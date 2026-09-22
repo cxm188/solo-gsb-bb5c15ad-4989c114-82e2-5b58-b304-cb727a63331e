@@ -157,3 +157,124 @@ button.small { padding: 2px 8px; font-size: 12px; }
 }
 .conflict-item.no-geometry { cursor: default; }
 .conflict-item.no-geometry:hover { background: #fff; }
+
+.hint { font-size: 12px; color: #888; margin: 4px 0 0; line-height: 1.5; }
+
+/* ---- 预检结果弹窗 ---- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.overlay.hidden { display: none; }
+
+.modal {
+  background: #fff;
+  border-radius: 8px;
+  width: min(760px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid #eee;
+}
+.modal-head h2 { margin: 0; font-size: 16px; color: #1f3b57; }
+.modal-foot {
+  padding: 12px 18px;
+  border-top: 1px solid #eee;
+  margin-bottom: 0;
+  justify-content: flex-end;
+}
+
+.precheck-summary { padding: 12px 18px 4px; }
+.summary-line { font-size: 13px; margin-bottom: 6px; }
+.summary-line.sub { color: #555; }
+.summary-line .warn { color: #b25f00; }
+.summary-line .err { color: #b33; }
+.sum-total { font-weight: bold; margin-right: 8px; }
+.sum-badge {
+  display: inline-block;
+  border-radius: 10px;
+  padding: 1px 10px;
+  font-size: 12px;
+  margin-right: 6px;
+}
+.sum-badge.valid { background: #e6f4ea; color: #1a7f37; }
+.sum-badge.warning { background: #fff4e0; color: #b25f00; }
+.sum-badge.error { background: #fdecea; color: #b33; }
+
+.precheck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 18px;
+  overflow-y: auto;
+  flex: 1;
+}
+.precheck-item {
+  border: 1px solid #e6e6e6;
+  border-left: 4px solid #aaa;
+  border-radius: 6px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.precheck-item.valid { border-left-color: #1a7f37; }
+.precheck-item.warning { border-left-color: #e8a017; }
+.precheck-item.error { border-left-color: #d0000b; }
+.precheck-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  flex-wrap: wrap;
+}
+.precheck-head strong { font-size: 13px; }
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-dot.valid { background: #1a7f37; }
+.status-dot.warning { background: #e8a017; }
+.status-dot.error { background: #d0000b; }
+.status-text { font-size: 12px; }
+.status-text.valid { color: #1a7f37; }
+.status-text.warning { color: #b25f00; }
+.status-text.error { color: #b33; }
+
+.jsonpath {
+  font-family: monospace;
+  font-size: 11px;
+  background: #f2f4f7;
+  color: #555;
+  border-radius: 3px;
+  padding: 0 5px;
+  margin-left: auto;
+}
+.precheck-body { padding: 0 10px 8px 30px; }
+.issue-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.issue {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 3px 0;
+  border-top: 1px dashed #eee;
+  font-size: 12.5px;
+}
+.issue .jsonpath { margin-left: 4px; }
+.issue.warning .issue-level { color: #b25f00; }
+.issue.error .issue-level { color: #b33; font-weight: bold; }
+.issue-msg { color: #444; }
+.no-issue { color: #1a7f37; font-size: 12.5px; padding: 4px 0; }
+.modal label.small { font-size: 12px; color: #555; padding-left: 18px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }

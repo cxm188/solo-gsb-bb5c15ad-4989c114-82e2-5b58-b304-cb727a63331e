@@ -8,6 +8,8 @@ const state = {
   selectedLayers: new Set(),
   lastResult: null,
   typeFilter: 'all',
+  lastPrecheck: null,
+  selectedImport: new Set(),
 };
 
 // 冲突类型展示配置
@@ -149,7 +151,7 @@ async function refreshZones() {
   renderLayerFilters();
 }
 
-async function importGeoJSON(text) {
+async function runPrecheck(text) {
   let data;
   try {
     data = JSON.parse(text);
@@ -158,13 +160,153 @@ async function importGeoJSON(text) {
     return;
   }
   try {
-    const res = await api('/api/zones/import', { method: 'POST', body: JSON.stringify(data) });
-    showMsg($('importMsg'), `成功导入 ${res.imported} 个区域`, true);
-    $('geojsonInput').value = '';
-    await refreshZones();
+    const report = await api('/api/zones/precheck', { method: 'POST', body: JSON.stringify(data) });
+    state.lastPrecheck = report;
+    showPrecheck(report);
+    if (report.summary.importable === 0) {
+      showMsg($('importMsg'), '预检未通过：没有可导入的要素，请按弹窗中的路径定位修复', false);
+    } else if (report.summary.invalid === 0) {
+      showMsg($('importMsg'), '预检完成：全部要素可导入，请在弹窗中确认', true);
+    } else {
+      showMsg($('importMsg'), `预检完成：${report.summary.importable} 项可导入、${report.summary.invalid} 项存在错误`, false);
+    }
   } catch (err) {
     showMsg($('importMsg'), err.message, false);
   }
+}
+
+// ---------- 预检结果弹窗 ----------
+function showPrecheck(report) {
+  const s = report.summary;
+  $('precheckSummary').innerHTML = `
+    <div class="summary-line">
+      <span class="sum-total">共 ${s.total} 个要素</span>
+      <span class="sum-badge valid">✓ 通过 ${s.valid}</span>
+      <span class="sum-badge warning">⚠ 可修复 ${s.withWarnings}</span>
+      <span class="sum-badge error">✕ 错误 ${s.invalid}</span>
+    </div>
+    <div class="summary-line sub">
+      问题合计：<b class="err">${s.errorCount} 个错误</b> / <b class="warn">${s.warningCount} 个警告</b>，
+      规范化将自动应用 <b>${s.fixCount}</b> 处修复
+    </div>`;
+
+  state.selectedImport = new Set(report.importableIndexes);
+  const list = $('precheckList');
+  list.innerHTML = '';
+  report.features.forEach((f) => {
+    const li = document.createElement('li');
+    li.className = `precheck-item ${f.status}`;
+
+    const head = document.createElement('div');
+    head.className = 'precheck-head';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = f.importable;
+    cb.disabled = !f.importable;
+    cb.onchange = () => {
+      cb.checked ? state.selectedImport.add(f.index) : state.selectedImport.delete(f.index);
+      syncSelectAll();
+    };
+    const statusLabel = { valid: '通过', warning: '警告·可修复', error: '错误·不可导入' }[f.status];
+    head.appendChild(cb);
+    head.innerHTML +=
+      `<span class="status-dot ${f.status}"></span>` +
+      `<strong>#${f.index + 1} ${escapeHtml(f.name)}</strong>` +
+      `<span class="status-text ${f.status}">${statusLabel}</span>` +
+      `<code class="jsonpath">${escapeHtml(f.path)}</code>`;
+    li.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'precheck-body';
+    const renderIssue = (it, level) => `
+      <li class="issue ${level}">
+        <span class="issue-level">${level === 'error' ? '✕' : '⚠'}</span>
+        <span class="issue-msg">${escapeHtml(it.message)}</span>
+        <code class="jsonpath">${escapeHtml(it.path)}</code>
+      </li>`;
+    const issues = [
+      ...f.errors.map((e) => renderIssue(e, 'error')),
+      ...f.warnings.map((w) => renderIssue(w, 'warning')),
+    ].join('');
+    body.innerHTML = issues ? `<ul class="issue-list">${issues}</ul>` : '<div class="no-issue">无问题，可直接导入</div>';
+    li.appendChild(body);
+
+    list.appendChild(li);
+  });
+
+  syncSelectAll();
+  $('precheckOverlay').classList.remove('hidden');
+}
+
+function syncSelectAll() {
+  const importable = state.lastPrecheck.importableIndexes;
+  const all = importable.length > 0 && importable.every((i) => state.selectedImport.has(i));
+  $('selectAllPass').checked = all;
+  $('confirmImportBtn').disabled = state.selectedImport.size === 0;
+  $('downloadNormalizedBtn').disabled = state.lastPrecheck.importableIndexes.length === 0;
+}
+
+function closePrecheck() {
+  $('precheckOverlay').classList.add('hidden');
+}
+
+function buildNormalizedForDownload() {
+  const report = state.lastPrecheck;
+  const wanted = state.selectedImport;
+  return {
+    type: 'FeatureCollection',
+    metadata: {
+      normalizedAt: report.checkedAt,
+      note: '由质量预检生成的规范化 GeoJSON（仅含选中的通过项）',
+      sourceSummary: report.summary,
+    },
+    features: report.features
+      .filter((f) => f.importable && wanted.has(f.index))
+      .map((f) => f.normalized),
+  };
+}
+
+async function confirmImport() {
+  const report = state.lastPrecheck;
+  if (!report || state.selectedImport.size === 0) return;
+  const indexes = [...state.selectedImport].sort((a, b) => a - b);
+  try {
+    const res = await api('/api/zones/import-confirmed', {
+      method: 'POST',
+      body: JSON.stringify({
+        confirmed: true,
+        normalized: report.normalized,
+        importableIndexes: report.importableIndexes,
+        indexes,
+      }),
+    });
+    closePrecheck();
+    const skipped = report.summary.invalid;
+    const unselected = report.summary.importable - res.imported;
+    const parts = [`成功导入 ${res.imported} 个规范化区域`];
+    if (unselected > 0) parts.push(`跳过 ${unselected} 个未勾选项`);
+    if (skipped > 0) parts.push(`${skipped} 个错误项未导入`);
+    showMsg($('importMsg'), parts.join('，'), true);
+    $('geojsonInput').value = '';
+    state.lastPrecheck = null;
+    await refreshZones();
+  } catch (err) {
+    showMsg($('importMsg'), `导入失败：${err.message}`, false);
+  }
+}
+
+function downloadNormalized() {
+  const data = buildNormalizedForDownload();
+  if (!data.features.length) return;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `normalized-${new Date().toISOString().slice(0, 10)}.geojson`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function deleteZone(id) {
@@ -326,7 +468,21 @@ async function refreshAnalyses() {
 }
 
 // ---------- 事件绑定 ----------
-$('importBtn').onclick = () => importGeoJSON($('geojsonInput').value.trim());
+$('importBtn').onclick = () => runPrecheck($('geojsonInput').value.trim());
+
+$('confirmImportBtn').onclick = confirmImport;
+$('downloadNormalizedBtn').onclick = downloadNormalized;
+$('cancelImportBtn').onclick = closePrecheck;
+$('precheckCloseBtn').onclick = closePrecheck;
+$('precheckOverlay').onclick = (e) => { if (e.target === $('precheckOverlay')) closePrecheck(); };
+$('selectAllPass').onchange = (e) => {
+  const importable = state.lastPrecheck.importableIndexes;
+  state.selectedImport = e.target.checked ? new Set(importable) : new Set();
+  document.querySelectorAll('#precheckList input[type=checkbox]').forEach((cb) => {
+    if (!cb.disabled) cb.checked = e.target.checked;
+  });
+  syncSelectAll();
+};
 
 $('fileInput').onchange = (e) => {
   const file = e.target.files[0];

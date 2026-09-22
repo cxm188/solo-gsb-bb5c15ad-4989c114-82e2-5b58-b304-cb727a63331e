@@ -4,6 +4,7 @@
 
 ## 功能
 
+- **导入质量预检与规范化**：导入前逐要素做独立预检，不写入任何数据。检查项包括环闭合、顶点数量、自相交/自接触、时间字段（缺失/非法/起止倒置）与资源字段（类型/空白/重复）；问题区分**错误（阻断导入）**与**警告（可导入）**，每条问题给出 **JSONPath 定位**（如 `$.features[2].geometry.coordinates[0][1]`）。对可修复问题生成规范化预览（补/去闭合重复点、连续重复顶点去重、资源拆分去空白去重、别名时间字段统一、日期格式统一），在结果页展示预检汇总，**用户确认后才写入区域库**；可只勾选导入通过项，并下载规范化 GeoJSON
 - **GeoJSON 导入**：支持 `FeatureCollection` / 单个 `Feature`，文件上传或文本粘贴；要素需带 `properties.start` / `properties.end`（ISO 日期），可选 `properties.resources`（字符串数组，如 `["塔吊", "挖掘机"]`）
 - **空间冲突检测**：先判断时间窗口重叠，再用 polygon-clipping 对多边形做真实求交（支持 Polygon / MultiPolygon、带孔多边形），面积按局部等距投影计算（m²/公顷）
 - **共享资源冲突检测**：时间重叠且 `resources` 存在交集即判定资源冲突；与空间冲突同时成立时合并为一条 `both` 记录，避免重复计数
@@ -27,13 +28,35 @@ npm install
 npm start
 ```
 
-启动后浏览器访问 **http://localhost:3000** ，点击「加载示例」→「导入」→「运行冲突分析」即可看到完整流程（示例数据同时包含空间冲突、资源冲突与两者合并的情形）。
+启动后浏览器访问 **http://localhost:3000** ，点击「加载示例」→「质量预检」查看预检汇总与规范化预览 →「导入选中的通过项」→「运行冲突分析」即可看到完整流程（示例数据同时包含空间冲突、资源冲突与两者合并的情形）。
 
 ### 运行测试
 
 ```bash
 npm test
 ```
+
+## 导入质量预检规则
+
+预检在导入前进行，不写入任何数据。问题分两级：
+
+- **错误（error，阻断导入）**：几何类型非 Polygon/MultiPolygon、坐标非法/越界、环顶点不足 3 个、退化环、**自相交/自接触**、缺少起止时间、时间无法解析、结束不晚于开始
+- **警告（warning，可导入）**：**环未闭合**（自动补首点）、连续重复顶点/重复闭合点（自动去重）、环绕方向不符合 RFC 7946（仅提示）、资源非数组/含空白/重复（自动拆分、去空白、去重）、时间字段使用别名（`startTime`/`from` 等，统一为 `start`/`end`）、日期格式不统一（`2026/10/1`、`2026年10月1日` 统一为 `2026-10-01`，含时间的写法统一为 ISO 8601）、缺少 name/layer（自动补全）
+
+每条问题均带 `path`（JSONPath，定位到要素/属性/具体环与顶点）、`code` 与中文说明；可修复问题同时给出 `fixes`（含修复前后值）与 `normalized` 规范化要素。预检响应结构：
+
+```json
+{
+  "summary": { "total": 3, "valid": 1, "withWarnings": 1, "invalid": 1, "importable": 2,
+               "errorCount": 1, "warningCount": 4, "fixCount": 2 },
+  "features": [{ "index": 0, "name": "...", "path": "$.features[0]", "status": "warning",
+                 "importable": true, "errors": [], "warnings": [], "fixes": [], "normalized": { } }],
+  "importableIndexes": [0, 2],
+  "normalized": { "type": "FeatureCollection", "features": [] }
+}
+```
+
+结果页按要素列出状态与问题路径，可逐要素勾选（错误项不可勾选），「下载规范化 GeoJSON」导出当前勾选的规范化要素（浏览器端生成，不落盘），「导入选中的通过项」经 `/api/zones/import-confirmed` 写入区域库。
 
 ## 输入数据格式
 
@@ -82,7 +105,9 @@ npm test
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/zones` | 列出全部区域（含 `resources`） |
-| POST | `/api/zones/import` | 导入 GeoJSON |
+| POST | `/api/zones/precheck` | 质量预检（不写库）：逐要素返回错误/警告（含 JSONPath）、修复项与规范化预览 |
+| POST | `/api/zones/import-confirmed` | 用户确认后导入预检生成的规范化要素，body：`{confirmed:true, normalized, importableIndexes?, indexes?}`；`indexes` 为原 GeoJSON 要素索引，仅导入勾选项 |
+| POST | `/api/zones/import` | 直接导入 GeoJSON（保留的兼容接口，建议优先使用预检流程） |
 | DELETE | `/api/zones/:id` | 删除区域 |
 | DELETE | `/api/zones` | 清空区域 |
 | GET | `/api/layers` | 图层列表 |
@@ -98,12 +123,14 @@ npm test
 ```
 ├── server.js            # Express 入口与 API 路由
 ├── src/
+│   ├── precheck.js      # 导入质量预检（环闭合/顶点/自相交/时间/资源）与规范化预览
 │   ├── analysis.js      # 时空/资源冲突检测与错峰建议生成
 │   ├── geo.js           # 局部投影与面积计算
 │   └── store.js         # JSON 文件持久化（区域 / 已保存分析）
-├── public/              # 前端（Leaflet 地图 + 分析面板）
+├── public/              # 前端（Leaflet 地图 + 分析面板 + 预检结果弹窗）
 │   └── sample.geojson   # 示例数据（含 resources 字段）
 ├── test/analysis.test.js
+├── test/precheck.test.js
 ├── Dockerfile
 └── docker-compose.yml
 ```

@@ -24,10 +24,11 @@
         </div>
         <textarea id="geojsonInput" rows="6" placeholder='粘贴 GeoJSON（FeatureCollection），要素需含 properties: {name, layer, start, end, resources?}'></textarea>
         <div class="row">
-          <button id="importBtn" class="primary" type="button">导入</button>
+          <button id="importBtn" class="primary" type="button">质量预检</button>
           <button id="clearBtn" class="danger" type="button">清空全部区域</button>
         </div>
         <p id="importMsg" class="msg"></p>
+        <p class="hint">导入前先做质量预检：检查环闭合、顶点数量、自相交、时间与资源字段；确认规范化预览后才会写入区域库。</p>
       </section>
 
       <section class="card">
@@ -76,6 +77,26 @@
       </section>
     </section>
   </main>
+
+  <!-- 预检结果弹窗 -->
+  <div id="precheckOverlay" class="overlay hidden">
+    <div class="modal" id="precheckModal">
+      <div class="modal-head">
+        <h2>质量预检结果</h2>
+        <button id="precheckCloseBtn" class="small" type="button">✕</button>
+      </div>
+      <div id="precheckSummary" class="precheck-summary"></div>
+      <div class="row">
+        <label class="small"><input type="checkbox" id="selectAllPass" checked /> 全选可导入项</label>
+      </div>
+      <ul id="precheckList" class="precheck-list"></ul>
+      <div class="modal-foot row">
+        <button id="confirmImportBtn" class="primary" type="button">导入选中的通过项</button>
+        <button id="downloadNormalizedBtn" type="button">下载规范化 GeoJSON</button>
+        <button id="cancelImportBtn" type="button">取消</button>
+      </div>
+    </div>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/app.js"></script>
