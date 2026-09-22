@@ -4,6 +4,7 @@
 
 ## 功能
 
+- **质量预检 + 规范化（导入前置，独立流程）**：导入前逐要素检查环闭合、顶点数量、自相交、时间字段与资源字段；问题分**错误（不可导入）**与**警告（可自动规范化）**两级，每条带 [JSONPath](https://datatracker.ietf.org/wg/jsonpath/) 定位（如 `$.features[0].geometry.coordinates[0][3]`）。可修复问题（未闭合环、多余闭合点/重复顶点、资源分隔字符串、资源重复/空白、非标准日期、时间别名键、缺名称/图层）生成**规范化预览**，用户在预检结果页勾选确认后才写入区域库；支持「只导入通过项」与下载规范化 GeoJSON。提交接口在服务端再次复检，绕过前端无法写入脏数据
 - **GeoJSON 导入**：支持 `FeatureCollection` / 单个 `Feature`，文件上传或文本粘贴；要素需带 `properties.start` / `properties.end`（ISO 日期），可选 `properties.resources`（字符串数组，如 `["塔吊", "挖掘机"]`）
 - **空间冲突检测**：先判断时间窗口重叠，再用 polygon-clipping 对多边形做真实求交（支持 Polygon / MultiPolygon、带孔多边形），面积按局部等距投影计算（m²/公顷）
 - **共享资源冲突检测**：时间重叠且 `resources` 存在交集即判定资源冲突；与空间冲突同时成立时合并为一条 `both` 记录，避免重复计数
@@ -27,7 +28,16 @@ npm install
 npm start
 ```
 
-启动后浏览器访问 **http://localhost:3000** ，点击「加载示例」→「导入」→「运行冲突分析」即可看到完整流程（示例数据同时包含空间冲突、资源冲突与两者合并的情形）。
+启动后浏览器访问 **http://localhost:3000** ，点击「加载示例」→「质量预检」→在结果页确认「导入选中项」→「运行冲突分析」即可看到完整流程（示例数据同时包含空间冲突、资源冲突与两者合并的情形）。点击「加载问题示例」可体验预检对未闭合环、自相交、顶点不足、日期/资源问题的分级拦截与自动修复。
+
+### 导入流程（预检 → 确认 → 写入）
+
+1. 选择/粘贴 GeoJSON 后点击「**质量预检**」（只检不写，区域库不变）
+2. 预检结果页展示汇总（通过数 / 错误数 / 警告数 / 自动修复数）与逐要素明细：
+   - **错误（红）**：自相交、顶点不足、坐标非法、时间缺失/非法/起止倒置、几何类型不支持等 → 不可勾选导入，需人工修复源数据
+   - **警告（黄，可自动规范化）**：未闭合环、多余闭合点/连续重复点、资源分隔字符串、资源重复/空白、非标准日期、时间别名键、缺名称/图层 → 已在预览中修复，可直接导入
+   - 每条问题标注 JSONPath，可据此回到源文件定位
+3. 勾选要导入的通过项（错误项自动禁用），点击「**导入选中项**」（服务端复检后才写入），或「**下载规范化 GeoJSON**」存档/二次处理
 
 ### 运行测试
 
@@ -82,7 +92,9 @@ npm test
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
 | GET | `/api/zones` | 列出全部区域（含 `resources`） |
-| POST | `/api/zones/import` | 导入 GeoJSON |
+| POST | `/api/zones/precheck` | **质量预检（只检不写）**：返回逐要素 error/warning（含 JSONPath）与规范化预览 |
+| POST | `/api/zones/commit` | **确认后写入**：body `{geojson, indexes?}`；服务端重新预检，含错误要素返回 422 整批拒绝 |
+| POST | `/api/zones/import` | 直接导入（兼容接口，脚本/CLI 用；网页端已改走预检流程） |
 | DELETE | `/api/zones/:id` | 删除区域 |
 | DELETE | `/api/zones` | 清空区域 |
 | GET | `/api/layers` | 图层列表 |
@@ -93,17 +105,38 @@ npm test
 | DELETE | `/api/analyses/:id` | 删除分析 |
 | GET | `/api/analyses/:id/export` | 导出 GeoJSON 报告（附件下载，含冲突类型与共享资源） |
 
+### 预检检查项与分级
+
+| 检查项 | 级别 | 代码 | 可否自动修复 |
+| --- | --- | --- | --- |
+| 几何类型不是 Polygon/MultiPolygon、geometry/properties 缺失 | 错误 | `geometry-type-unsupported` 等 | 否 |
+| 环顶点不是数值坐标（NaN/空值）、环/面结构非法 | 错误 | `ring-invalid-position` / `polygon-invalid` | 否 |
+| 线性环不足 4 个位置 / 有效顶点不足 3 个 | 错误 | `ring-too-few-vertices` / `ring-degenerate` | 否 |
+| 环自相交（非相邻边交叉/接触、非相邻顶点重合，如蝴蝶结） | 错误 | `ring-self-intersection` | 否（请人工修复） |
+| 时间缺失 / 无法解析 / 结束不晚于开始 | 错误 | `time-missing` / `time-invalid` / `time-range` | 否 |
+| 环未闭合 | 警告 | `ring-not-closed` | ✅ 自动补点闭合 |
+| 多余闭合点、连续重复顶点 | 警告 | `ring-duplicate-closure` / `ring-duplicate-vertex` | ✅ 去重 |
+| 坐标超出经纬度有效范围 | 警告 | `ring-coordinate-out-of-range` | 否（提示确认坐标系） |
+| 时间使用别名键（`startTime`/`from` 等）、非标准日期格式（`2026/10/01`、`2026年10月1日`、时间戳等） | 警告 | `time-alias-key` / `time-format` | ✅ 统一为 `start`/`end` + ISO 8601(UTC) |
+| 资源为分隔字符串、重复、带空白、含非文本条目、类型错误 | 警告 | `resource-string-split` / `resource-duplicate` 等 | ✅ 拆分、去重、去空白、剔除 |
+| 缺 `name` / `layer` | 警告 | `name-missing` / `layer-missing` | ✅ 自动命名 / 归入默认图层 |
+
+规范化动作：环统一为显式闭合且无重复点（保留第三维高程）；`start`/`end` 统一为 ISO 8601（UTC），移除时间别名键；`resources` 统一为去重去空白的字符串数组。`YYYY-MM-DD` 与带时区 ISO 8601 视为标准写法，不会产生警告。
+
 ## 项目结构
 
 ```
-├── server.js            # Express 入口与 API 路由
+├── server.js            # Express 入口与 API 路由（precheck / commit / import / analyze）
 ├── src/
 │   ├── analysis.js      # 时空/资源冲突检测与错峰建议生成
+│   ├── quality.js       # 导入质量预检与规范化（环/顶点/自相交/时间/资源，JSONPath 定位）
 │   ├── geo.js           # 局部投影与面积计算
 │   └── store.js         # JSON 文件持久化（区域 / 已保存分析）
-├── public/              # 前端（Leaflet 地图 + 分析面板）
-│   └── sample.geojson   # 示例数据（含 resources 字段）
+├── public/              # 前端（Leaflet 地图 + 分析面板 + 预检结果页）
+│   ├── sample.geojson   # 示例数据（含 resources 字段）
+│   └── sample-issues.geojson # 问题示例（各类错误/警告）
 ├── test/analysis.test.js
+├── test/quality.test.js
 ├── Dockerfile
 └── docker-compose.yml
 ```

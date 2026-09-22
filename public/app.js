@@ -8,6 +8,7 @@ const state = {
   selectedLayers: new Set(),
   lastResult: null,
   typeFilter: 'all',
+  lastPrecheck: null,   // 最近一次质量预检结果
 };
 
 // 冲突类型展示配置
@@ -149,7 +150,8 @@ async function refreshZones() {
   renderLayerFilters();
 }
 
-async function importGeoJSON(text) {
+// ---------- 质量预检与规范化导入 ----------
+async function runPrecheck(text) {
   let data;
   try {
     data = JSON.parse(text);
@@ -158,13 +160,177 @@ async function importGeoJSON(text) {
     return;
   }
   try {
-    const res = await api('/api/zones/import', { method: 'POST', body: JSON.stringify(data) });
-    showMsg($('importMsg'), `成功导入 ${res.imported} 个区域`, true);
-    $('geojsonInput').value = '';
-    await refreshZones();
+    const result = await api('/api/zones/precheck', { method: 'POST', body: JSON.stringify(data) });
+    state.lastPrecheck = result;
+    renderPrecheck(result);
+    $('precheckModal').hidden = false;
+    if (result.summary.blocked === 0) {
+      showMsg($('importMsg'), `预检完成：${result.summary.passed} 个要素全部可导入（${result.summary.withWarnings} 个含可自动修复的警告）`, true);
+    } else {
+      showMsg($('importMsg'), `预检完成：${result.summary.passed} 个可导入，${result.summary.blocked} 个存在错误需处理`, false);
+    }
   } catch (err) {
     showMsg($('importMsg'), err.message, false);
   }
+}
+
+const QC_STATUS = {
+  pass: { label: '通过', cls: 'pass' },
+  warning: { label: '可导入（已规范化）', cls: 'warn' },
+  error: { label: '错误，不可导入', cls: 'err' },
+};
+
+function renderPrecheck(result) {
+  const s = result.summary;
+  $('precheckSummary').innerHTML = `
+    <span class="qc-stat total">共 ${s.total} 个要素</span>
+    <span class="qc-stat pass">✓ 通过 ${s.passed}</span>
+    <span class="qc-stat warn">⚠ 警告 ${s.warningCount} 条（涉及 ${s.withWarnings} 个要素，自动修复 ${s.fixedWarningCount} 处）</span>
+    <span class="qc-stat err">✕ 错误 ${s.errorCount} 条（涉及 ${s.blocked} 个要素）</span>`;
+
+  const list = $('precheckReportList');
+  list.innerHTML = '';
+  result.reports.forEach((r) => {
+    const card = document.createElement('div');
+    card.className = `qc-item qc-${r.status}`;
+    const st = QC_STATUS[r.status];
+
+    const head = document.createElement('div');
+    head.className = 'qc-item-head';
+    const canImport = r.status !== 'error';
+    head.innerHTML = `
+      <label class="qc-pick">
+        <input type="checkbox" data-index="${r.index}" ${canImport ? '' : 'disabled'} ${canImport ? 'checked' : ''} />
+      </label>
+      <span class="qc-status qc-badge-${r.status}">${st.label}</span>
+      <strong>#${r.index + 1} ${escapeHtml(r.name)}</strong>
+      <code class="qc-path">${escapeHtml(r.sourcePath)}</code>`;
+    card.appendChild(head);
+
+    const issues = [...r.errors, ...r.warnings];
+    if (issues.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'qc-issues';
+      for (const it of issues) {
+        const li = document.createElement('li');
+        const tag = it.severity === 'error'
+          ? '<span class="qc-tag qc-tag-err">错误</span>'
+          : `<span class="qc-tag qc-tag-warn">警告${it.fixed ? '·已修复' : ''}</span>`;
+        li.innerHTML = `${tag} ${escapeHtml(it.message)} <code class="qc-path">${escapeHtml(it.path)}</code>`;
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    }
+
+    if (canImport && r.normalized) {
+      const det = document.createElement('details');
+      const p = r.normalized.properties;
+      det.innerHTML = `<summary>规范化预览</summary>
+        <div class="qc-preview">
+          <div>start：<code>${escapeHtml(p.start)}</code></div>
+          <div>end：<code>${escapeHtml(p.end)}</code></div>
+          <div>layer：<code>${escapeHtml(p.layer)}</code></div>
+          <div>resources：<code>${escapeHtml((p.resources || []).join('、') || '（无）')}</code></div>
+          <div>geometry：${r.normalized.geometry.type}，${countPositions(r.normalized.geometry)} 个位置（已显式闭合、去除重复点）</div>
+        </div>`;
+      card.appendChild(det);
+    }
+
+    list.appendChild(card);
+  });
+
+  syncSelectAll();
+}
+
+function countPositions(geometry) {
+  let n = 0;
+  (function walk(c) {
+    if (typeof c[0] === 'number') { n += 1; } else { c.forEach(walk); }
+  })(geometry.coordinates);
+  return n;
+}
+
+/** 当前弹窗中勾选的要素原始索引 */
+function selectedIndexes() {
+  return [...document.querySelectorAll('#precheckReportList input[type=checkbox]:checked')]
+    .map((cb) => Number(cb.dataset.index));
+}
+
+function syncSelectAll() {
+  const cb = $('selectAllPassed');
+  const enabled = [...document.querySelectorAll('#precheckReportList input[type=checkbox]:not(:disabled)')];
+  const checked = [...document.querySelectorAll('#precheckReportList input[type=checkbox]:checked')];
+  cb.checked = enabled.length > 0 && enabled.length === checked.length;
+}
+
+async function commitImport() {
+  const result = state.lastPrecheck;
+  if (!result) return;
+  const indexes = selectedIndexes();
+  if (!indexes.length) {
+    alert('请至少勾选一个无错误的要素');
+    return;
+  }
+  try {
+    // 以预检返回的规范化集合为提交内容，服务端会再次复检
+    const selectedSet = new Set(indexes);
+    const selectedReports = result.reports
+      .filter((r) => selectedSet.has(r.index) && r.normalized);
+    const fixedInSelection = selectedReports.reduce(
+      (n, r) => n + r.warnings.filter((w) => w.fixed).length, 0
+    );
+    const geojson = {
+      type: 'FeatureCollection',
+      features: selectedReports.map((r) => r.normalized),
+    };
+    const res = await api('/api/zones/commit', {
+      method: 'POST',
+      body: JSON.stringify({ geojson }),
+    });
+    $('precheckModal').hidden = true;
+    showMsg($('importMsg'),
+      `已导入 ${res.imported} 个区域` + (fixedInSelection ? `（导入前自动规范化 ${fixedInSelection} 处）` : ''),
+      true);
+    $('geojsonInput').value = '';
+    state.lastPrecheck = null;
+    await refreshZones();
+  } catch (err) {
+    alert(`导入失败：${err.message}`);
+  }
+}
+
+function downloadNormalized() {
+  const result = state.lastPrecheck;
+  if (!result) return;
+  const indexes = selectedIndexes();
+  const selectedSet = new Set(indexes);
+  // 勾选了要素时只下载勾选项；无勾选则下载全部通过项
+  const features = indexes.length
+    ? result.reports.filter((r) => selectedSet.has(r.index) && r.normalized).map((r) => r.normalized)
+    : result.normalized.features;
+  if (!features.length) {
+    alert('没有可下载的规范化要素（均存在错误）');
+    return;
+  }
+  const geojson = {
+    type: 'FeatureCollection',
+    metadata: {
+      generatedAt: result.generatedAt,
+      source: 'quality-precheck',
+      total: result.summary.total,
+      passed: features.length,
+      blocked: result.summary.blocked,
+      warningsFixed: result.summary.fixedWarningCount,
+    },
+    features,
+  };
+  const blob = new Blob([JSON.stringify(geojson, null, 2)], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `normalized-${new Date().toISOString().slice(0, 10)}.geojson`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 async function deleteZone(id) {
@@ -326,7 +492,7 @@ async function refreshAnalyses() {
 }
 
 // ---------- 事件绑定 ----------
-$('importBtn').onclick = () => importGeoJSON($('geojsonInput').value.trim());
+$('precheckBtn').onclick = () => runPrecheck($('geojsonInput').value.trim());
 
 $('fileInput').onchange = (e) => {
   const file = e.target.files[0];
@@ -340,6 +506,26 @@ $('loadSampleBtn').onclick = async () => {
   const res = await fetch('/sample.geojson');
   $('geojsonInput').value = JSON.stringify(await res.json(), null, 2);
 };
+
+$('loadIssuesSampleBtn').onclick = async () => {
+  const res = await fetch('/sample-issues.geojson');
+  $('geojsonInput').value = JSON.stringify(await res.json(), null, 2);
+};
+
+// 预检结果弹窗
+$('precheckCloseBtn').onclick = () => { $('precheckModal').hidden = true; };
+$('precheckModal').onclick = (e) => {
+  if (e.target.id === 'precheckModal') $('precheckModal').hidden = true;
+};
+$('commitImportBtn').onclick = commitImport;
+$('downloadNormalizedBtn').onclick = downloadNormalized;
+$('selectAllPassed').onchange = (e) => {
+  document.querySelectorAll('#precheckReportList input[type=checkbox]:not(:disabled)')
+    .forEach((cb) => { cb.checked = e.target.checked; });
+};
+document.addEventListener('change', (e) => {
+  if (e.target.matches('#precheckReportList input[type=checkbox]')) syncSelectAll();
+});
 
 $('clearBtn').onclick = async () => {
   if (!confirm('确定清空全部已导入区域？')) return;

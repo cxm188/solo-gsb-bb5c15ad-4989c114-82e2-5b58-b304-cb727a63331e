@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const { analyze, normalizeZone } = require('./src/analysis');
+const { precheck, extractFeatures } = require('./src/quality');
 const store = require('./src/store');
 
 const app = express();
@@ -25,23 +26,10 @@ app.get('/api/zones', (req, res) => {
 });
 
 // 导入 GeoJSON（FeatureCollection / 单个 Feature / 几何数组均可）
+// 保留原有直接导入接口（CLI/脚本兼容）；网页端默认走下方 precheck → commit 两步流程
 app.post('/api/zones/import', (req, res) => {
   try {
-    const body = req.body;
-    let features = [];
-    if (body && body.type === 'FeatureCollection' && Array.isArray(body.features)) {
-      features = body.features;
-    } else if (body && body.type === 'Feature') {
-      features = [body];
-    } else if (Array.isArray(body)) {
-      features = body;
-    } else {
-      return res.status(400).json({ error: '请求体必须是 GeoJSON FeatureCollection 或 Feature' });
-    }
-    if (features.length === 0) {
-      return res.status(400).json({ error: 'GeoJSON 中没有任何要素' });
-    }
-
+    const features = extractFeatures(req.body).features;
     const zones = features.map((f, i) => {
       const z = normalizeZone(f, i);
       z.id = crypto.randomUUID();
@@ -50,6 +38,65 @@ app.post('/api/zones/import', (req, res) => {
     });
     store.addZones(zones);
     res.status(201).json({ imported: zones.length, zones });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ---- 质量预检与规范化（独立流程：只检不写，不改变区域库） ----
+
+// 预检：逐要素检查环闭合 / 顶点数 / 自相交 / 时间 / 资源，
+// 返回 error|warning 分级问题（带 JSONPath）与规范化预览
+app.post('/api/zones/precheck', (req, res) => {
+  try {
+    res.json(precheck(req.body));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// 确认提交：用户在预检结果页确认后才写入；服务端对提交内容重新预检，
+// 含错误要素则整批拒绝（防止绕过前端写入脏数据）
+app.post('/api/zones/commit', (req, res) => {
+  try {
+    const body = req.body;
+    const geojson = body && body.geojson ? body.geojson : body;
+    const indexes = body && Array.isArray(body.indexes) ? body.indexes : null;
+
+    let { features } = extractFeatures(geojson);
+    if (indexes) {
+      const selected = indexes
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < features.length)
+        .sort((a, b) => a - b)
+        .map((i) => features[i]);
+      if (selected.length === 0) {
+        return res.status(400).json({ error: '没有选中任何可导入要素' });
+      }
+      features = selected;
+    }
+
+    // 服务端复检：规范化结果本身不应再有 error
+    const result = precheck(features);
+    if (result.summary.blocked > 0) {
+      return res.status(422).json({
+        error: `提交的要素中有 ${result.summary.blocked} 个未通过预检，写入已中止`,
+        precheck: result,
+      });
+    }
+
+    // 复检通过后，以规范化要素为唯一事实来源写入（索引顺序即要素顺序）
+    const zones = result.normalized.features.map((f, i) => {
+      const z = normalizeZone(f, i);
+      z.id = crypto.randomUUID();
+      z.importedAt = new Date().toISOString();
+      return z;
+    });
+    store.addZones(zones);
+    res.status(201).json({
+      imported: zones.length,
+      warningsFixed: result.summary.fixedWarningCount,
+      zones,
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
